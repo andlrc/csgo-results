@@ -1,0 +1,132 @@
+#!/usr/bin/python3
+
+import sys
+import os
+import json
+import certifi
+import urllib3
+from bs4 import BeautifulSoup
+
+ROOT_DOMAIN = "https://www.hltv.org"
+MAX_SCRAPERS = 8
+
+def scrape_match(match):
+    http = urllib3.PoolManager(
+        cert_reqs="CERT_REQUIRED",
+        ca_certs=certifi.where())
+
+    url = ROOT_DOMAIN + match["link"]
+    req = http.request("GET", url)
+    soup = BeautifulSoup(req.data, "html.parser")
+
+    time_and_event = soup.select(".timeAndEvent")
+    if time_and_event:
+        time_and_event = time_and_event[0]
+        event = {}
+        event["played"] = int(time_and_event.select(".time")[0]["data-unix"])
+        event["link"] = time_and_event.select(".event a")[0]["href"]
+        event["name"] = time_and_event.select(".event")[0].get_text().strip()
+        match["event"] = event
+
+    maps = []
+    for tag in soup.select(".mapholder"):
+        played_map = {
+            "name": tag.select(".mapname")[0].get_text()
+        }
+        spans = tag.select(".results span")
+        if spans:
+            played_map["result"] = [
+                int(spans[0].get_text()),
+                int(spans[2].get_text())
+            ]
+            played_map["score"] = []
+            if len(spans) > 10:
+                for team_score in [[spans[4], spans[8]], [spans[6], spans[10]]]:
+                    played_map["score"].append([
+                        {
+                            "side": score["class"][0],
+                            "score": int(score.get_text())
+                        } for score in team_score
+                    ])
+        maps.append(played_map)
+    if maps:
+        map_ix = 0
+        for tag in soup.select(".matchstats .stats-content"):
+            if tag["id"] == "all-content":
+                continue
+            team_stats = []
+            for table in tag.select("table"):
+                player_stats = []
+                for row in table.select("tr"):
+                    if row.has_attr("class") and row["class"][0] == "header-row":
+                        continue
+                    tds = row.select("td")
+                    player_stat = {
+                        "player": {
+                            "link": tds[0].select("a")[0]["href"],
+                            "name": tds[0].get_text().strip(),
+                            "nick": tds[0].select(".player-nick")[0].get_text()
+                        }
+                    }
+                    try:
+                        # Sometimes the table are misaligned
+                        player_stat.update({
+                            "kd": [int(kd)
+                                   for kd in tds[1].get_text().split("-")],
+                            "adr": float(tds[3].get_text()),
+                            "kast": tds[4].get_text(),
+                            "rating": float(tds[5].get_text())
+                        })
+                    except Exception:
+                        pass
+                    player_stats.append(player_stat)
+                team_stats.append(player_stats)
+            maps[map_ix]["team_stats"] = team_stats
+            map_ix += 1
+        match["maps"] = maps
+
+    veto = [veto.get_text().strip() for veto in soup.select(".veto-box")]
+    if veto:
+        match["veto"] = veto
+
+    highlights = []
+    for tag in soup.select(".highlights .highlight"):
+        highlight = {
+            "text": tag.get_text(),
+            "media": tag["data-highlight-embed"]
+                     if tag.has_attr("data-highlight-embed") else None
+        }
+        highlights.append(highlight)
+    if highlights:
+        match["highlights"] = highlights
+
+    return match
+
+with open("results.json", "r") as file:
+    matches = json.load(file)
+    file.close()
+    scrapers = []
+    for i in range(MAX_SCRAPERS):
+        pid = os.fork()
+        if pid == 0:
+            while len(matches) > i:
+                match = matches[i]
+                filename = "matches/{}.json".format(match["id"])
+                if os.path.isfile(filename):
+                    print("{}/{} - Skipping: {}".format(i + 1, len(matches),
+                                                        filename))
+                else:
+                    print("{}/{}: {}".format(i, len(matches), match["link"]),
+                          file=sys.stderr)
+                    match_data = scrape_match(match)
+                    with open(filename, "w") as file:
+                        file.write(json.dumps(match_data, indent=4))
+                        file.close()
+                i += MAX_SCRAPERS
+            os._exit(0)
+        else:
+            scrapers.append(pid)
+
+    while scrapers:
+        (pid, exit_status) = os.wait()
+        scrapers.remove(pid)

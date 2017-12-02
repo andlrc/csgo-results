@@ -1,0 +1,60 @@
+#!/usr/bin/python3
+import sys
+import json
+import certifi
+import urllib3
+from bs4 import BeautifulSoup
+
+ROOT_DOMAIN = "https://www.hltv.org"
+
+def scrape_data():
+    http = urllib3.PoolManager(
+        cert_reqs="CERT_REQUIRED",
+        ca_certs=certifi.where())
+
+    results = []
+    offset = 0
+
+    while True:
+        url = "{}/results?offset={}".format(ROOT_DOMAIN, offset)
+        print("Opening {}".format(url), file=sys.stderr)
+
+        req = http.request("GET", url)
+        soup = BeautifulSoup(req.data, "html.parser")
+        found = False
+        for tag in soup.select(".result-con"):
+            found = True
+            link = tag.select("> a")[0]["href"]
+            result = [int(tag.get_text()) for tag in
+                      tag.select(".result-score span")]
+            match = {
+                # /matches/NNNN/team1-vs-team2-event
+                "id": int(link.split("/")[2]),
+                "link": link,
+                "teams": [
+                    {
+                        "name": tag.select(".team1 .team")[0].get_text(),
+                        "result": result[0],
+                        "logo": tag.select(".team1 img")[0]["src"]
+                    },
+                    {
+                        "name": tag.select(".team2 .team")[0].get_text(),
+                        "result": result[1],
+                        "logo": tag.select(".team2 img")[0]["src"]
+                    }
+                ],
+                "event": tag.select(".event-name")[0].get_text()
+            }
+            results.append(match)
+
+        if not found:
+            return results
+        offset += 100
+
+results = scrape_data()
+
+if not results:
+    print("Failed to fetch results", file=sys.stderr)
+    exit(1)
+
+print(json.dumps(results, indent=4))
